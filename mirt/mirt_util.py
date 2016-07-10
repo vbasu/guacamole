@@ -14,7 +14,10 @@ functions:
         calculate the energy of correctness data given exercises,
         parameters, and abilities.
     sample_abilities_diffusion:
-        sample the ability vector for this user from the posterior over user
+
+    print "exercise_ind_dict:", exercise_ind_dict
+    sys.exit()
+    sample the ability vector for this user from the posterior over user
         ability conditioned on the observed exercise performance.
 
 class Parameters, which holds parameters for a MIRT model.
@@ -147,6 +150,7 @@ def get_exercise_ind(exercise_names, exercise_ind_dict):
         A 1-d ndarray of indices, with shape = (len(exercise_names)).
 
     """
+
     # do something sensible if a string is passed in instead of an array-like
     # object -- just wrap it
     if isinstance(exercise_names, str) or isinstance(exercise_names, unicode):
@@ -254,10 +258,16 @@ def sample_abilities_diffusion_wrapper(args):
     theta, state, options, user_index = args
     # make sure each student gets a different random sequence
     id = multiprocessing.current_process()._identity
+    """ This causes an error, using fix from issue tracker
     if len(id) > 0:
         np.random.seed([id[0], time.time() * 1e9])
     else:
         np.random.seed([time.time() * 1e9])
+    """ 
+    if len(id) > 0:
+        np.random.seed([id[0], int(time.time() * 1e9) % 1<<32])
+    else:
+        np.random.seed([int(time.time() * 1e9) % 1<<32])
 
     num_steps = options.sampling_num_steps
 
@@ -516,6 +526,10 @@ class MirtModel(object):
         results = self.get_sampling_results()
         for result in results:
             abilities, El, ind = result
+            #print "abilities", abilities
+            #print "El", El
+            #print "ind", ind
+            #sys.exit()
             self.user_states[ind].abilities = abilities.copy()
             average_energy += El / float(len(self.user_states))
 

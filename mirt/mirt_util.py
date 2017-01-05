@@ -183,12 +183,15 @@ def conditional_probability_correct(abilities, ex_parameters, exercise_ind):
     Returns:
         An ndarray of floats with shape = (exercise_ind.size)
     """
+
     # Pad the abilities vector with a 1 to act as a bias.
     # The shape of abilities will become (a+1, 1).
     abilities = np.append(abilities.copy(), np.ones((1, 1)), axis=0)
     difficulties = ex_parameters.W_correct[exercise_ind, :]
     Z = sigmoid(np.dot(difficulties, abilities))
     Z = np.reshape(Z, Z.size)  # flatten to 1-d ndarray
+
+    #print "actual Wq", np.dot(difficulties, abilities)
     return Z
 
 
@@ -217,10 +220,20 @@ def conditional_energy_data(
     Returns:
         A 1-d ndarray of probabilities, with shape = (q)
     """
+
+    #print "called conditional_energy_data"
+    #print "conditional_energy_data W_correct", theta.W_correct
+
     # predicted probability correct
     c_pred = conditional_probability_correct(abilities, theta, exercise_ind)
     # probability of actually observed sequence of responses
+    #print "component 1", c_pred*correct
+    #print "component 2", (1-c_pred)*(1-correct)
     p_data = c_pred * correct + (1 - c_pred) * (1 - correct)
+    #c1 = c_pred * correct
+    #c2 = (1-c_pred)*(1-correct)
+    #p_data = c1+c2
+    #print "p_data", p_data
 
     # probability of observed time_taken
     # TODO(jascha) - This code could be faster if abilities was stored with
@@ -238,6 +251,7 @@ def conditional_energy_data(
     E_observed = -np.log(p_data) + E_time_taken
     assert len(E_observed.shape) == 1
 
+    #print "E_observed", E_observed
     return E_observed
 
 
@@ -263,17 +277,18 @@ def sample_abilities_diffusion_wrapper(args):
         np.random.seed([id[0], time.time() * 1e9])
     else:
         np.random.seed([time.time() * 1e9])
-    """ 
+    """
     if len(id) > 0:
         np.random.seed([id[0], int(time.time() * 1e9) % 1<<32])
     else:
         np.random.seed([int(time.time() * 1e9) % 1<<32])
 
     num_steps = options.sampling_num_steps
-
+    '''
     abilities, Eabilities, _, _ = sample_abilities_diffusion(
         theta, state, num_steps=num_steps)
-
+    '''
+    abilities, Eabilities, _, _ = sample_abilities_diffusion_HMC(theta, state)
     # TODO(jascha/eliana) returning mean abilities may lead to bias.
     # (eg, may push weights to be too large)  Investigate this
     return abilities, Eabilities, user_index
@@ -368,6 +383,92 @@ def sample_abilities_diffusion(theta, state, num_steps=200,
     stdev = np.std(sample_chain, 0).reshape(theta.num_abilities, 1)
 
     return abilities, E_abilities, mean_sample_abilities, stdev
+
+def sample_abilities_diffusion_HMC(theta, state): #Uh, clean up this garbage
+    """
+    Input:
+        theta:
+            a Parameter object that stores W
+        state:
+            an object that stores correct
+    Returns a four-tuple:
+        1. The final ability sample in the chain
+        2. The energy of the final sample in the chain
+        3. The mean of the ability samples in the entire chain
+        4. The stdev of the ability samples in the entire chain
+    """
+    abilities_init = state.abilities
+    correct = state.correct
+    exercise_ind = state.exercise_ind
+    if abilities_init is None:
+         abilities = np.random.randn(theta.num_abilities, 1)
+    else:
+        abilities = abilities_init
+
+        q_init = np.random.randn(theta.num_abilities, 1)
+
+    correct = correct.reshape((-1,1))
+    sample_chain = generate_HMC_samples(q_init, abilities, theta.W_correct,
+                                        correct, theta.num_abilities)
+
+    sample_chain = np.asarray(sample_chain)
+    mean_sample_abilities = np.mean(sample_chain,
+            0).reshape(theta.num_abilities, 1)
+    stdev = np.std(sample_chain, 0).reshape(theta.num_abilities, 1)
+
+    final_sample = sample_chain[-1]
+    E_abilities = U(final_sample, abilities, theta.W_correct, correct)
+
+    return final_sample, E_abilities, mean_sample_abilities, stdev
+
+def U(q, abilities, W_correct, correct):
+    abilities_a = np.append(abilities.copy(), np.ones((1,1)), axis=0)
+    Wq = np.dot(W_correct, abilities_a)
+    aLL = 0.5 * np.dot(abilities_a.T, abilities_a) - \
+                np.dot(correct.T, Wq) -\
+                np.sum(np.log(1 - sigmoid(Wq)))
+    return aLL
+
+def dUdq(q, abilities, W_correct, correct):
+    abilities_a = np.append(abilities.copy(), np.ones((1,1)), axis=0)
+    Wq = np.dot(W_correct, abilities_a)
+    A = q - np.dot(W_correct.T, correct - sigmoid(Wq))
+    return A[:-1]
+
+def generate_HMC_samples(q_init, abilities, W_correct, correct, dim,
+                            num_samples=10, eps=0.1, L=200):
+    sample_chain = []
+    q = np.copy(q_init)
+    for _ in xrange(num_samples):
+        q = HMC(q, abilities, W_correct, correct, eps, L, dim)
+        sample_chain.append(q)
+
+    return sample_chain
+
+def HMC(current_q, abilities, W_correct, correct, eps, L, dim):
+    q = np.copy(current_q)
+    p = np.random.randn(dim, 1).reshape((-1,1))
+    current_p = np.copy(p)
+    p -= eps * dUdq(q, abilities, W_correct, correct)/2
+
+    for i in xrange(L):
+        q += eps*p
+        if i < L-1:
+            p -= eps*dUdq(q, abilities, W_correct, correct)
+
+    p -= eps*dUdq(q, abilities, W_correct, correct)/2
+    p = -p
+
+    current_U = U(current_q, abilities, W_correct, correct)
+    current_K = np.asscalar(np.dot(current_p.T, current_p)) / 2
+    proposed_U = U(q, abilities, W_correct, correct)
+    proposed_K = np.asscalar(np.dot(p.T, p)) / 2
+
+    unif_random = np.random.uniform()
+    if np.exp((current_U+current_K) - (proposed_U+proposed_K)) > unif_random:
+        return q
+    else:
+        return current_q
 
 
 def L_dL_singleuser(arg):

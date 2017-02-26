@@ -34,7 +34,6 @@ import time
 from train_util.regression_util import sigmoid
 from train_util.model_training_util import FieldIndexer
 
-
 class Parameters(object):
     """Hold the parameters for a MIRT model.  Also hold the gradients for each
     parameter during training.
@@ -191,7 +190,6 @@ def conditional_probability_correct(abilities, ex_parameters, exercise_ind):
     Z = sigmoid(np.dot(difficulties, abilities))
     Z = np.reshape(Z, Z.size)  # flatten to 1-d ndarray
 
-    #print "actual Wq", np.dot(difficulties, abilities)
     return Z
 
 
@@ -221,19 +219,10 @@ def conditional_energy_data(
         A 1-d ndarray of probabilities, with shape = (q)
     """
 
-    #print "called conditional_energy_data"
-    #print "conditional_energy_data W_correct", theta.W_correct
-
     # predicted probability correct
     c_pred = conditional_probability_correct(abilities, theta, exercise_ind)
     # probability of actually observed sequence of responses
-    #print "component 1", c_pred*correct
-    #print "component 2", (1-c_pred)*(1-correct)
     p_data = c_pred * correct + (1 - c_pred) * (1 - correct)
-    #c1 = c_pred * correct
-    #c2 = (1-c_pred)*(1-correct)
-    #p_data = c1+c2
-    #print "p_data", p_data
 
     # probability of observed time_taken
     # TODO(jascha) - This code could be faster if abilities was stored with
@@ -251,7 +240,6 @@ def conditional_energy_data(
     E_observed = -np.log(p_data) + E_time_taken
     assert len(E_observed.shape) == 1
 
-    #print "E_observed", E_observed
     return E_observed
 
 
@@ -282,9 +270,8 @@ def sample_abilities_diffusion_wrapper(args):
         np.random.seed([id[0], int(time.time() * 1e9) % 1<<32])
     else:
         np.random.seed([int(time.time() * 1e9) % 1<<32])
-
-    num_steps = options.sampling_num_steps
     '''
+    num_steps = options.sampling_num_steps
     abilities, Eabilities, _, _ = sample_abilities_diffusion(
         theta, state, num_steps=num_steps)
     '''
@@ -296,6 +283,7 @@ def sample_abilities_diffusion_wrapper(args):
 
 def sample_abilities_diffusion(theta, state, num_steps=200,
                                sampling_epsilon=.5):
+    #Default was num_steps=200, sampling_epsilon=.5
     """Sample the ability vector for this user from the posterior over user
     ability conditioned on the observed exercise performance. Use
     Metropolis-Hastings with Gaussian proposal distribution.
@@ -384,7 +372,80 @@ def sample_abilities_diffusion(theta, state, num_steps=200,
 
     return abilities, E_abilities, mean_sample_abilities, stdev
 
-def sample_abilities_diffusion_HMC(theta, state): #Uh, clean up this garbage
+def sample_abilities_diffusion_MTM(theta, state, num_steps=200, eps=0.5):
+    '''
+    Multiple try metropolis
+
+    Input:
+        theta: a Parameter object that stores W
+        state: an object that stores correct
+    Output:
+        1. The final ability sample in the chain
+        2. The energy of the final sample in the chain
+        3. The mean of the ability samples in the entire chain
+        4. The stdev of the ability samples in the entire chain
+
+    '''
+
+    abilities_init = state.abilities
+    correct = state.correct
+    exercise_ind = state.exercise_ind
+
+    if abilities_init is None:
+        abilities = np.random.randn(theta.num_abilities, 1)
+    else:
+        abilities = abilities_init
+
+    W_correct = theta.W_correct
+    E_abilities = 0.5 * np.dot(abilities.T, abilities) + np.sum(
+            conditional_energy_data(
+                abilities, theta, exercise_ind, correct, log_time_taken))
+
+    k = 5 #number of proposals step
+    def T(x,y): #transition function
+        diff = x-y
+        return sampling_epsilon * np.exp(-0.5 * np.dot(diff.T, diff))
+
+    def w(x,y): #weight function
+        return np.exp(q(x, abilities, W_correct, correct)) * T(x,y)
+
+    sample_chain = []
+    for _ in range(num_steps):
+        #draw k iid trial proposals from T(x,)
+        proposals = [abilities + sampling_epsilon * np.random.randn(
+            theta.nuM_abilities, 1) for _ in xrange(k)]
+
+        #select Y=y among the trial set w/ prob proportional to w(y_j,x)
+        weights = []
+        E_proposal = 0.5 * np.dot(proposal.T, proposal) + np.sum(
+                conditional_energy_data(
+                    proposal, theta, exercise_ind, correct, log_time_taken))
+
+        #probability of accepting proposal
+        if E_abilities - E_proposal > 0.:
+            p_accept = 1.0
+        else:
+            p_accept = np.exp(E_abilities - E_proposal)
+
+        if not np.isfinite(E_proposal):
+            warnings.warn("Warning. Non-finite proposal energy.")
+            p_accept = 0.0
+
+        if p_accept > np.random.rand():
+            abilities = proposal
+            E_abilities = E_proposal
+
+        sample_chain.append(abilities[:,0].tolist())
+
+    sample_chain = np.asarray(sample_chain)
+
+    mean_sample_abilities = np.mean(sample_chain, 0).reshape(
+        theta.num_abilities, 1)
+    stdev = np.std(sample_chain, 0).reshape(theta.num_abilities, 1)
+
+    return abilities, E_abilities, mean_sample_abilities, stdev
+
+def sample_abilities_diffusion_HMC(theta, state):
     """
     Input:
         theta:
@@ -405,10 +466,10 @@ def sample_abilities_diffusion_HMC(theta, state): #Uh, clean up this garbage
     else:
         abilities = abilities_init
 
-        q_init = np.random.randn(theta.num_abilities, 1)
+        #q_init = np.random.randn(theta.num_abilities, 1)
 
     correct = correct.reshape((-1,1))
-    sample_chain = generate_HMC_samples(q_init, abilities, theta.W_correct,
+    sample_chain = generate_HMC_samples(abilities, theta.W_correct,
                                         correct, theta.num_abilities)
 
     sample_chain = np.asarray(sample_chain)
@@ -417,53 +478,54 @@ def sample_abilities_diffusion_HMC(theta, state): #Uh, clean up this garbage
     stdev = np.std(sample_chain, 0).reshape(theta.num_abilities, 1)
 
     final_sample = sample_chain[-1]
-    E_abilities = U(final_sample, abilities, theta.W_correct, correct)
+    E_abilities = U(final_sample, theta.W_correct, correct)
 
     return final_sample, E_abilities, mean_sample_abilities, stdev
 
-def U(q, abilities, W_correct, correct):
-    abilities_a = np.append(abilities.copy(), np.ones((1,1)), axis=0)
+def U(q, W_correct, correct):
+    abilities_a = np.append(q.copy(), np.ones((1,1)), axis=0)
     Wq = np.dot(W_correct, abilities_a)
-    aLL = 0.5 * np.dot(abilities_a.T, abilities_a) - \
+    LL = 0.5 * np.dot(abilities_a.T, abilities_a) - \
                 np.dot(correct.T, Wq) -\
                 np.sum(np.log(1 - sigmoid(Wq)))
-    return aLL
+    return LL
 
-def dUdq(q, abilities, W_correct, correct):
-    abilities_a = np.append(abilities.copy(), np.ones((1,1)), axis=0)
+def dUdq(q, W_correct, correct):
+    abilities_a = np.append(q.copy(), np.ones((1,1)), axis=0)
     Wq = np.dot(W_correct, abilities_a)
-    A = q - np.dot(W_correct.T, correct - sigmoid(Wq))
-    return A[:-1]
+    A = abilities_a - np.dot(W_correct.T, correct - sigmoid(Wq))
+    return A[:-1] #The bias dimension exists only for computing purposes
 
-def generate_HMC_samples(q_init, abilities, W_correct, correct, dim,
-                            num_samples=10, eps=0.1, L=200):
+def generate_HMC_samples(abilities, W_correct, correct, dim,
+                            num_samples=2, eps=0.5, L=100):
     sample_chain = []
-    q = np.copy(q_init)
+    q = np.copy(abilities)
     for _ in xrange(num_samples):
-        q = HMC(q, abilities, W_correct, correct, eps, L, dim)
+        q = HMC(q, W_correct, correct, eps, L, dim)
         sample_chain.append(q)
 
     return sample_chain
 
-def HMC(current_q, abilities, W_correct, correct, eps, L, dim):
+def HMC(current_q, W_correct, correct, eps, L, dim):
     q = np.copy(current_q)
     p = np.random.randn(dim, 1).reshape((-1,1))
     current_p = np.copy(p)
-    p -= eps * dUdq(q, abilities, W_correct, correct)/2
+    p -= eps * dUdq(q, W_correct, correct)/2
 
     for i in xrange(L):
         q += eps*p
         if i < L-1:
-            p -= eps*dUdq(q, abilities, W_correct, correct)
+            p -= eps*dUdq(q, W_correct, correct)
 
-    p -= eps*dUdq(q, abilities, W_correct, correct)/2
+    p -= eps*dUdq(q, W_correct, correct)/2
     p = -p
 
-    current_U = U(current_q, abilities, W_correct, correct)
+    current_U = U(current_q, W_correct, correct)
     current_K = np.asscalar(np.dot(current_p.T, current_p)) / 2
-    proposed_U = U(q, abilities, W_correct, correct)
+    proposed_U = U(q, W_correct, correct)
     proposed_K = np.asscalar(np.dot(p.T, p)) / 2
 
+    #Acceptance rule
     unif_random = np.random.uniform()
     if np.exp((current_U+current_K) - (proposed_U+proposed_K)) > unif_random:
         return q
@@ -627,16 +689,13 @@ class MirtModel(object):
         results = self.get_sampling_results()
         for result in results:
             abilities, El, ind = result
-            #print "abilities", abilities
-            #print "El", El
-            #print "ind", ind
-            #sys.exit()
             self.user_states[ind].abilities = abilities.copy()
             average_energy += El / float(len(self.user_states))
 
+        '''
         sys.stderr.write("E joint log L + const %f, " % (
                          - average_energy / np.log(2.)))
-
+        '''
         # debugging info -- accumulate mean and covariance of abilities vector
         mn_a = 0.
         cov_a = 0.
@@ -644,7 +703,7 @@ class MirtModel(object):
             mn_a += state.abilities[:, 0].T / float(len(self.user_states))
             cov_a += (state.abilities[:, 0] ** 2).T / (
                 float(len(self.user_states)))
-        sys.stderr.write("<abilities> " + str(mn_a))
+        sys.stderr.write("<abilities>" + str(mn_a))
         sys.stderr.write(", <abilities^2>" + str(cov_a) + ", ")
 
         # Maximization step
@@ -664,15 +723,24 @@ class MirtModel(object):
             self.theta.sigma_time[:] = 1.
             self.theta.W_time[:, :] = 0.
 
+        print "W_correct"
+        print self.theta.W_correct
+
         # debugging info on the progress of the training
-        sys.stderr.write("M conditional log L %f, " % (-L))
+        sys.stderr.write("M conditional log L %f, \n" % (-L))
+        '''
         sys.stderr.write("reg penalty %f, " % (
             self.options.regularization * np.sum(theta_flat ** 2)))
         sys.stderr.write("||couplings|| %f, " % (
             np.sqrt(np.sum(self.theta.flat() ** 2))))
         sys.stderr.write("||dcouplings|| %f\n" % (
             np.sqrt(np.sum((theta_flat - old_theta_flat) ** 2))))
+        '''
 
+        print "||couplings|| %f" % (
+                np.sqrt(np.sum(self.theta.flat()[:20] ** 2)))
+        print "||dcouplings|| %f" % (
+                np.sqrt(np.sum((theta_flat[:20] - old_theta_flat[:20]) ** 2)))
         # Maintain a consistent directional meaning of a
         # high/low ability estimate.  We always prefer higher ability to
         # mean better performance; therefore, we prefer positive couplings.

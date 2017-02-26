@@ -372,79 +372,6 @@ def sample_abilities_diffusion(theta, state, num_steps=200,
 
     return abilities, E_abilities, mean_sample_abilities, stdev
 
-def sample_abilities_diffusion_MTM(theta, state, num_steps=200, eps=0.5):
-    '''
-    Multiple try metropolis
-
-    Input:
-        theta: a Parameter object that stores W
-        state: an object that stores correct
-    Output:
-        1. The final ability sample in the chain
-        2. The energy of the final sample in the chain
-        3. The mean of the ability samples in the entire chain
-        4. The stdev of the ability samples in the entire chain
-
-    '''
-
-    abilities_init = state.abilities
-    correct = state.correct
-    exercise_ind = state.exercise_ind
-
-    if abilities_init is None:
-        abilities = np.random.randn(theta.num_abilities, 1)
-    else:
-        abilities = abilities_init
-
-    W_correct = theta.W_correct
-    E_abilities = 0.5 * np.dot(abilities.T, abilities) + np.sum(
-            conditional_energy_data(
-                abilities, theta, exercise_ind, correct, log_time_taken))
-
-    k = 5 #number of proposals step
-    def T(x,y): #transition function
-        diff = x-y
-        return sampling_epsilon * np.exp(-0.5 * np.dot(diff.T, diff))
-
-    def w(x,y): #weight function
-        return np.exp(q(x, abilities, W_correct, correct)) * T(x,y)
-
-    sample_chain = []
-    for _ in range(num_steps):
-        #draw k iid trial proposals from T(x,)
-        proposals = [abilities + sampling_epsilon * np.random.randn(
-            theta.nuM_abilities, 1) for _ in xrange(k)]
-
-        #select Y=y among the trial set w/ prob proportional to w(y_j,x)
-        weights = []
-        E_proposal = 0.5 * np.dot(proposal.T, proposal) + np.sum(
-                conditional_energy_data(
-                    proposal, theta, exercise_ind, correct, log_time_taken))
-
-        #probability of accepting proposal
-        if E_abilities - E_proposal > 0.:
-            p_accept = 1.0
-        else:
-            p_accept = np.exp(E_abilities - E_proposal)
-
-        if not np.isfinite(E_proposal):
-            warnings.warn("Warning. Non-finite proposal energy.")
-            p_accept = 0.0
-
-        if p_accept > np.random.rand():
-            abilities = proposal
-            E_abilities = E_proposal
-
-        sample_chain.append(abilities[:,0].tolist())
-
-    sample_chain = np.asarray(sample_chain)
-
-    mean_sample_abilities = np.mean(sample_chain, 0).reshape(
-        theta.num_abilities, 1)
-    stdev = np.std(sample_chain, 0).reshape(theta.num_abilities, 1)
-
-    return abilities, E_abilities, mean_sample_abilities, stdev
-
 def sample_abilities_diffusion_HMC(theta, state):
     """
     Input:
@@ -497,7 +424,7 @@ def dUdq(q, W_correct, correct):
     return A[:-1] #The bias dimension exists only for computing purposes
 
 def generate_HMC_samples(abilities, W_correct, correct, dim,
-                            num_samples=2, eps=0.5, L=100):
+                            num_samples=2, eps=0.5, L=50):
     sample_chain = []
     q = np.copy(abilities)
     for _ in xrange(num_samples):

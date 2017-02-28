@@ -276,6 +276,7 @@ def sample_abilities_diffusion_wrapper(args):
         theta, state, num_steps=num_steps)
     '''
     abilities, Eabilities, _, _ = sample_abilities_diffusion_HMC(theta, state)
+
     # TODO(jascha/eliana) returning mean abilities may lead to bias.
     # (eg, may push weights to be too large)  Investigate this
     return abilities, Eabilities, user_index
@@ -409,7 +410,7 @@ def sample_abilities_diffusion_HMC(theta, state):
 
     return final_sample, E_abilities, mean_sample_abilities, stdev
 
-def U(q, W_correct, correct):
+def U(q, W_correct, correct): #Negative log likelihood function
     abilities_a = np.append(q.copy(), np.ones((1,1)), axis=0)
     Wq = np.dot(W_correct, abilities_a)
     LL = 0.5 * np.dot(abilities_a.T, abilities_a) - \
@@ -417,7 +418,7 @@ def U(q, W_correct, correct):
                 np.sum(np.log(1 - sigmoid(Wq)))
     return LL
 
-def dUdq(q, W_correct, correct):
+def dUdq(q, W_correct, correct): #Partial of potential function wrt q
     abilities_a = np.append(q.copy(), np.ones((1,1)), axis=0)
     Wq = np.dot(W_correct, abilities_a)
     A = abilities_a - np.dot(W_correct.T, correct - sigmoid(Wq))
@@ -434,16 +435,27 @@ def generate_HMC_samples(abilities, W_correct, correct, dim,
     return sample_chain
 
 def HMC(current_q, W_correct, correct, eps, L, dim):
+    '''
+    An implementation of the leapfrog method
+    Adapted from "MCMC using Hamiltonian Dynamics" by Neal:
+    https://arxiv.org/pdf/1206.1901.pdf
+    The psuedocode can be found on page 14 as figure 2
+    '''
     q = np.copy(current_q)
     p = np.random.randn(dim, 1).reshape((-1,1))
     current_p = np.copy(p)
+
+    #Take half a step with the momentum
     p -= eps * dUdq(q, W_correct, correct)/2
 
     for i in xrange(L):
+        #Take a full step for the position
         q += eps*p
+        #Take a full step for the momentum
         if i < L-1:
             p -= eps*dUdq(q, W_correct, correct)
 
+    #At the end, take a half step for the momentum
     p -= eps*dUdq(q, W_correct, correct)/2
     p = -p
 
@@ -458,7 +470,6 @@ def HMC(current_q, W_correct, correct, eps, L, dim):
         return q
     else:
         return current_q
-
 
 def L_dL_singleuser(arg):
     """Calculate log likelihood and gradient wrt couplings of mIRT model
